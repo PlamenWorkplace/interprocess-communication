@@ -18,5 +18,9 @@
 #define MESSAGES_H
 
 // define the data structures for your messages here
+typedef struct
+{
+    int job, data;
+} MQ_MESSAGE;
 
 #endif
