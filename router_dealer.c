@@ -38,7 +38,8 @@ void close_mqs(mqd_t client2dealer_queue, mqd_t dealer2worker1_queue, mqd_t deal
               char client2dealer_name[], char dealer2worker1_name[], char dealer2worker2_name[], char worker2dealer_name[]);
 void validate_mq(mqd_t mq, char queue_name[]);
 bool is_child_running(pid_t child_pid);
-void receiveFromMq(void);
+bool receive_async_queue(mqd_t queue, MQ_MESSAGE *msg);
+void transfer_to_worker(mqd_t dealer2worker1_queue, mqd_t dealer2worker2_queue, MQ_MESSAGE m);
 
 int main(int argc, char * argv[])
 {
@@ -78,14 +79,20 @@ int main(int argc, char * argv[])
   create_processes(&pid_client, client2dealer_name, dealer2worker1_name, dealer2worker2_name, worker2dealer_name);
   
   MQ_MESSAGE m;
+  bool has_message;
 
   while (is_child_running(pid_client))
   {
-    receiveFromMq();
+    bool has_message = receive_async_queue(client2dealer_queue, &m);
+    if (has_message) 
+      transfer_to_worker(dealer2worker1_queue, dealer2worker2_queue, m);
+
+    bool has_message = receive_async_queue(worker2dealer_queue, &m);
+    if (has_message) 
+      print_worker_response(m);
+
     sleep(1);  // Avoid busy-waiting
   }
-
-  
 
   while (wait(NULL) > 0);  // Wait for all children
   fprintf (stderr, "All child processes have finished.\n");
@@ -116,41 +123,52 @@ void open_mqs(mqd_t *client2dealer_queue, mqd_t *dealer2worker1_queue, mqd_t *de
   validate_mq(*worker2dealer_queue, worker2dealer_name);
 }
 
-void create_processes(pid_t *pid_client, char client2dealer_name[], char dealer2worker1_name[], char dealer2worker2_name[], char worker2dealer_name[]) {
+void create_processes(pid_t *pid_client, char client2dealer_name[], char dealer2worker1_name[], char dealer2worker2_name[], char worker2dealer_name[]) 
+{
   // Client
   *pid_client = fork();
-  if (*pid_client < 0) {
-      perror("fork() failed");
-      exit(1);
-  } else if (*pid_client == 0) {
-      fprintf (stderr, "Child created. Starting process ./client\n");
-      execlp("./client", "./client", client2dealer_name, NULL);
-      perror("execlp() failed");
-      exit(1);
+  if (*pid_client < 0) 
+  {
+    perror("fork() failed");
+    exit(1);
+  } 
+  else if (*pid_client == 0) 
+  {
+    fprintf (stderr, "Child created. Starting process ./client\n");
+    execlp("./client", "./client", client2dealer_name, NULL);
+    perror("execlp() failed");
+    exit(1);
   }
 
   pid_t pid;
   // Worker 1
-  for (int i = 0; i < N_SERV1; i++) {
+  for (int i = 0; i < N_SERV1; i++) 
+  {
     pid = fork();
-    if (pid < 0) {
-        perror("fork() failed");
-        exit(1);
-    } else if (pid == 0) {
-        fprintf (stderr, "Child created. Starting process ./worker_s1 for the %d time\n", i+1);
-        execlp("./worker_s1", "./worker_s1", dealer2worker1_name, worker2dealer_name, NULL);
-        perror("execlp() failed");
-        exit(1);
+    if (pid < 0) 
+    {
+      perror("fork() failed");
+      exit(1);
+    } 
+    else if (pid == 0) {
+      fprintf (stderr, "Child created. Starting process ./worker_s1 for the %d time\n", i+1);
+      execlp("./worker_s1", "./worker_s1", dealer2worker1_name, worker2dealer_name, NULL);
+      perror("execlp() failed");
+      exit(1);
     }
   }
 
   // Worker 2
-  for (int i = 0; i < N_SERV2; i++) {
+  for (int i = 0; i < N_SERV2; i++) 
+  {
     pid = fork();
-    if (pid < 0) {
+    if (pid < 0) 
+    {
         perror("fork() failed");
         exit(1);
-    } else if (pid == 0) {
+    } 
+    else if (pid == 0) 
+    {
         fprintf (stderr, "Child created. Starting process ./worker_s2 for the %d time\n", i+1);
         execlp("./worker_s2", "./worker_s2", dealer2worker2_name, worker2dealer_name, NULL);
         perror("execlp() failed");
@@ -193,7 +211,8 @@ void validate_mq(mqd_t mq, char queue_name[])
     getpid(), mq, attr.mq_maxmsg, attr.mq_msgsize, attr.mq_curmsgs);
 }
 
-bool is_child_running(pid_t child_pid) {
+bool is_child_running(pid_t child_pid) 
+{
   int status;
   pid_t result = waitpid(child_pid, &status, WNOHANG);
   
@@ -213,11 +232,28 @@ bool is_child_running(pid_t child_pid) {
   else
   {
       perror("waitpid() failed");
-      exit (1);
+      exit(1);
   }
 }
 
-void receiveFromMq(void)
+bool receive_async_queue(mqd_t queue, MQ_MESSAGE *msg)
+{
+  int result = mq_receive(queue, (char*)msg, sizeof(MQ_MESSAGE), NULL);
+
+  if (result == -1) 
+  {
+    if (errno != EAGAIN)
+    {
+      perror("Receiving failed");
+      exit(1);
+    }
+
+    return false;
+  }
+  return true;
+}
+
+void transfer_to_worker(mqd_t dealer2worker1_queue, mqd_t dealer2worker2_queue, MQ_MESSAGE m)
 {
 
 }
