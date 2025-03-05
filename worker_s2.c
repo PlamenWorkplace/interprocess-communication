@@ -45,7 +45,70 @@ int main (int argc, char * argv[])
     //      - write the results to the Rsp message queue
     //    until there are no more tasks to do
     //  * close the message queues
+    if (argc<3){
+        fprintf(stderr,"usage: %s <S2_QUEUE_NAME> <RSP_QUEUE_NAME>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
 
+    // Open the first queue - S2, as read only
+    mqd_t mq_fd_s2 = mq_open(argv[1], O_RDONLY);
+    if (mq_fd_s2 == (mqd_t)-1){
+        perror("mq_open S2 fail");
+        exit(EXIT_FAILURE);
+    }
+
+    // Open the second queue - RSP, as write only
+    mqd_t mq_fd_rsp = mq_open(argv[2], O_WRONLY);
+    if (mq_fd_rsp == (mqd_t)-1){
+        perror("mq_open RSP fail");
+        mq_close(mq_fd_s2);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("worker_s2 (PID %d): started, listening on '%s', responding on '%s'\n",
+    getpid(), argv[1], argv[2]);
+
+    // Handle requests
+    while (true){
+        MQ_MESSAGE req; //change this when we have a message queue
+        ssize_t bytes_read = mq_receive(mq_fd_s2, (char*)&req, sizeof(req), NULL);
+
+        //use this later to handle interrupted messages
+        if (bytes_read == -1){
+            
+            if (errno == EINTR){
+                continue;
+            }
+            perror("mq_receive S1 fail");
+            break;
+        }
+
+        printf("worker_sq (PID %d): received job=%d, data=%d\n",
+        getpid(), req.job, req.data);
+
+        rsleep(10000);    
+
+        //result
+        int result = service(req.data);
+
+        //reply
+        MQ_MESSAGE rsp;
+        rsp.job = req.job;
+        rsp.data = result;
+
+        printf("worker_s2 (PID %d): sending job=%d, result=%d\n",
+        getpid(), rsp.job, rsp.data);
+
+        if (mq_send(mq_fd_rsp, (char *)&rsp, sizeof(rsp), 0) == -1){
+            perror("mq_send RSP fail");
+            break;
+        }
+    }
+
+    //close queues
+    mq_close(mq_fd_s2);
+    mq_close(mq_fd_rsp);
+    return(0);
     return(0);
 }
 
