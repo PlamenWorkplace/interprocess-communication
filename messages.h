@@ -20,7 +20,7 @@
 // define the data structures for your messages here
 typedef struct
 {
-    int job, data;
+    int job, data, service;
 } MQ_MESSAGE;
 
 #endif
