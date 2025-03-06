@@ -122,13 +122,13 @@ void open_mqs(mqd_t *client2dealer_queue, mqd_t *dealer2worker1_queue, mqd_t *de
   // Open queues
   struct mq_attr attr = { .mq_maxmsg = MQ_MAX_MESSAGES, .mq_msgsize = sizeof(MQ_MESSAGE) };
 
-  *client2dealer_queue = mq_open(client2dealer_name, O_RDONLY | O_CREAT | O_EXCL | O_NONBLOCK, 0600, &attr);
+  *client2dealer_queue = mq_open(client2dealer_name, O_RDONLY | O_CREAT | O_EXCL, 0600, &attr);
   validate_mq(*client2dealer_queue, client2dealer_name);
   *dealer2worker1_queue = mq_open(dealer2worker1_name, O_WRONLY | O_CREAT | O_EXCL | O_NONBLOCK, 0600, &attr);
   validate_mq(*dealer2worker1_queue, dealer2worker1_name);
   *dealer2worker2_queue = mq_open(dealer2worker2_name, O_WRONLY | O_CREAT | O_EXCL | O_NONBLOCK, 0600, &attr);
   validate_mq(*dealer2worker2_queue, dealer2worker2_name);
-  *worker2dealer_queue = mq_open(worker2dealer_name, O_RDONLY | O_CREAT | O_EXCL | O_NONBLOCK, 0600, &attr);
+  *worker2dealer_queue = mq_open(worker2dealer_name, O_RDONLY | O_CREAT | O_EXCL, 0600, &attr);
   validate_mq(*worker2dealer_queue, worker2dealer_name);
 }
 
