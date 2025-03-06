@@ -24,6 +24,7 @@
 #include <errno.h>    
 #include <unistd.h>    // for execlp
 #include <mqueue.h>    // for mq
+#include <signal.h>
 
 
 #include "settings.h"  
@@ -33,7 +34,7 @@
 
 void open_mqs(mqd_t *client2dealer_queue, mqd_t *dealer2worker1_queue, mqd_t *dealer2worker2_queue, mqd_t *worker2dealer_queue,
               char client2dealer_name[], char dealer2worker1_name[], char dealer2worker2_name[], char worker2dealer_name[]);
-void create_processes(pid_t *pid_client, char client2dealer_name[], char dealer2worker1_name[], char dealer2worker2_name[], char worker2dealer_name[]);
+void create_processes(pid_t *pid_client, pid_t *pid_workers, char client2dealer_name[], char dealer2worker1_name[], char dealer2worker2_name[], char worker2dealer_name[]);
 void close_mqs(mqd_t client2dealer_queue, mqd_t dealer2worker1_queue, mqd_t dealer2worker2_queue, mqd_t worker2dealer_queue,
               char client2dealer_name[], char dealer2worker1_name[], char dealer2worker2_name[], char worker2dealer_name[]);
 void validate_mq(mqd_t mq, char queue_name[]);
@@ -43,6 +44,8 @@ bool transfer_to_worker(mqd_t dealer2worker1_queue, mqd_t dealer2worker2_queue, 
 void add_job(int **jobList, int *jobListSize, int jobId);
 void remove_job(int **jobList, int *jobListSize, int jobId);
 void process_wroker_response(mqd_t queue, int **jobList, int *jobListSize);
+void terminate_all_workers(pid_t *pids, int num_workers);
+void wait_for_all_workers(pid_t *pids, int num_workers);
 
 int main(int argc, char * argv[])
 {
@@ -62,6 +65,7 @@ int main(int argc, char * argv[])
   mqd_t worker2dealer_queue;
 
   pid_t pid_client;
+  pid_t pid_workers[1 + N_SERV1 + N_SERV2];
   int *jobList = NULL;
   int jobListSize = 0;
   
@@ -81,7 +85,7 @@ int main(int argc, char * argv[])
 
   open_mqs(&client2dealer_queue, &dealer2worker1_queue, &dealer2worker2_queue, &worker2dealer_queue, 
             client2dealer_name, dealer2worker1_name, dealer2worker2_name, worker2dealer_name);
-  create_processes(&pid_client, client2dealer_name, dealer2worker1_name, dealer2worker2_name, worker2dealer_name);
+  create_processes(&pid_client, pid_workers, client2dealer_name, dealer2worker1_name, dealer2worker2_name, worker2dealer_name);
   
   MQ_MESSAGE m;
 
@@ -103,8 +107,11 @@ int main(int argc, char * argv[])
     process_wroker_response(worker2dealer_queue, &jobList, &jobListSize);
   }
 
-  while (wait(NULL) > 0);  // Wait for all children
-  fprintf (stderr, "All child processes have finished.\n");
+  fprintf(stderr, "Parent is sending termination signal to workers...\n");
+  terminate_all_workers(pid_workers, N_SERV1 + N_SERV2);
+  wait_for_all_workers(pid_workers, N_SERV1 + N_SERV2);
+  fprintf(stderr, "All workers terminated and cleaned up.\n");
+
   close_mqs(client2dealer_queue, dealer2worker1_queue, dealer2worker2_queue, worker2dealer_queue, 
               client2dealer_name, dealer2worker1_name, dealer2worker2_name, worker2dealer_name);
   return (0);
@@ -132,8 +139,11 @@ void open_mqs(mqd_t *client2dealer_queue, mqd_t *dealer2worker1_queue, mqd_t *de
   validate_mq(*worker2dealer_queue, worker2dealer_name);
 }
 
-void create_processes(pid_t *pid_client, char client2dealer_name[], char dealer2worker1_name[], char dealer2worker2_name[], char worker2dealer_name[]) 
+void create_processes(pid_t *pid_client, pid_t *pid_workers, char client2dealer_name[], char dealer2worker1_name[], char dealer2worker2_name[], char worker2dealer_name[]) 
 {
+  pid_t pid;
+  int pid_index = 0;
+
   // Client
   *pid_client = fork();
   if (*pid_client < 0) 
@@ -143,13 +153,11 @@ void create_processes(pid_t *pid_client, char client2dealer_name[], char dealer2
   } 
   else if (*pid_client == 0) 
   {
-    fprintf (stderr, "Child created. Starting process ./client\n");
     execlp("./client", "./client", client2dealer_name, NULL);
     perror("execlp() failed");
     exit(1);
   }
 
-  pid_t pid;
   // Worker 1
   for (int i = 0; i < N_SERV1; i++) 
   {
@@ -161,11 +169,12 @@ void create_processes(pid_t *pid_client, char client2dealer_name[], char dealer2
     } 
     else if (pid == 0)
     {
-      fprintf (stderr, "Child created. Starting process ./worker_s1 for the %d time\n", i+1);
       execlp("./worker_s1", "./worker_s1", dealer2worker1_name, worker2dealer_name, NULL);
       perror("execlp() failed");
       exit(1);
     }
+
+    pid_workers[pid_index++] = pid;
   }
 
   // Worker 2
@@ -179,11 +188,12 @@ void create_processes(pid_t *pid_client, char client2dealer_name[], char dealer2
     } 
     else if (pid == 0) 
     {
-        fprintf (stderr, "Child created. Starting process ./worker_s2 for the %d time\n", i+1);
         execlp("./worker_s2", "./worker_s2", dealer2worker2_name, worker2dealer_name, NULL);
         perror("execlp() failed");
         exit(1);
     }
+
+    pid_workers[pid_index++] = pid;
   }
 }
 
@@ -218,8 +228,6 @@ void validate_mq(mqd_t mq, char queue_name[])
     perror("");
     exit (1);
   }
-  fprintf (stderr, "%d: mqdes=%d max=%ld size=%ld nrof=%ld\n", 
-    getpid(), mq, attr.mq_maxmsg, attr.mq_msgsize, attr.mq_curmsgs);
 }
 
 bool is_child_running(pid_t child_pid) 
@@ -230,9 +238,9 @@ bool is_child_running(pid_t child_pid)
   if (result == child_pid) // Terminated
   { 
     if (WIFEXITED(status)) 
-        printf("Child process %d exited with status %d.\n", child_pid, WEXITSTATUS(status));
+      fprintf(stderr, "Child process %d exited with status %d.\n", child_pid, WEXITSTATUS(status));
     else if (WIFSIGNALED(status)) 
-        printf("Child process %d was terminated by signal %d.\n", child_pid, WTERMSIG(status));
+      fprintf(stderr, "Child process %d was terminated by signal %d.\n", child_pid, WTERMSIG(status));
     
     return false;
   } 
@@ -249,6 +257,18 @@ bool is_child_running(pid_t child_pid)
 
 bool receive_queue(mqd_t queue, MQ_MESSAGE *msg)
 {
+  struct mq_attr attr;
+  if (mq_getattr(queue, &attr) == -1) 
+  {
+      perror("mq_getattr failed");
+      exit(1);
+  }
+
+  // If the queue is empty, skip receiving
+  if (attr.mq_curmsgs == 0) 
+  {
+      return false;
+  }
   int result = mq_receive(queue, (char*)msg, sizeof(MQ_MESSAGE), NULL);
 
   if (result == -1) 
@@ -349,7 +369,25 @@ void process_wroker_response(mqd_t queue, int **jobList, int *jobListSize)
   
   if (has_received) 
   {
-    printf("Service: %d, Data: %d\n", m.service, m.data);
+    fprintf(stderr, "Service: %d, Data: %d\n", m.service, m.data);
     remove_job(jobList, jobListSize, m.job);
+  }
+}
+
+void terminate_all_workers(pid_t *pids, int num_workers) {
+  for (int i = 0; i < num_workers; i++) {
+      if (pids[i] > 0) {
+          // Send SIGTERM to the worker process
+          kill(pids[i], SIGTERM);
+      }
+  }
+}
+
+void wait_for_all_workers(pid_t *pids, int num_workers) {
+  int status;
+  for (int i = 0; i < num_workers; i++) {
+      if (pids[i] > 0) {
+          waitpid(pids[i], &status, 0); // Wait for each worker to exit
+      }
   }
 }
