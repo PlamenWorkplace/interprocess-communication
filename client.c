@@ -30,7 +30,7 @@ static void rsleep (int t);
 
 int main (int argc, char * argv[])
 {
-    // TODO:
+     // TODO:
     // (see message_queue_test() in interprocess_basic.c)
     //  * open the message queue (whose name is provided in the
     //    arguments)
@@ -39,6 +39,39 @@ int main (int argc, char * argv[])
     //      - send the request to the Req message queue
     //    until there are no more requests to send
     //  * close the message queue
+
+    //check number of arguments
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <Req_queue_name>\n", argv[0]); //print used queue name
+        exit(EXIT_FAILURE); 
+    }
+
+    // opens the message queue
+    const char *reqQueueName = argv[1];
+    mqd_t mq_req = mq_open(reqQueueName, O_WRONLY);
+    if (mq_req == (mqd_t)-1) {
+        perror("mq_open failed");
+        exit(EXIT_FAILURE); // exit if failed
+    }
     
-    return (0);
+    int jobID, data, service;
+    int ret;
+    
+    // get the next job request
+    while ((ret = getNextRequest(&jobID, &data, &service)) == NO_ERR) {
+        MQ_MESSAGE msg;
+        msg.job = jobID;
+        msg.data = data;
+        msg.service = service;
+        
+        // send the request to the Req message queue
+        if (mq_send(mq_req, (char *)&msg, sizeof(msg), 0) == -1) {
+            perror("mq_send failed");
+            mq_close(mq_req);
+            exit(EXIT_FAILURE);
+        }
+    }
+    
+    mq_close(mq_req);
+    return 0;
 }
