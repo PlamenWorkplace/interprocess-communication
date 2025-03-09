@@ -32,7 +32,7 @@
 
 static void rsleep (int t);
 void validate_mq(mqd_t mq, char queue_name[]);
-void send_to_router(MQ_MESSAGE *msg);
+void send_to_router(MQ_MESSAGE msg);
 bool receive_with_timeout(mqd_t queue, MQ_MESSAGE *msg);
 
 mqd_t mq_fd_s1, mq_fd_rsp;
@@ -65,7 +65,7 @@ int main (int argc, char * argv[])
     validate_mq(mq_fd_s1, queue_name_s1);
 
     // Open the second queue - RSP, as write only
-    mq_fd_rsp = mq_open(queue_name_rsp, O_WRONLY);
+    mq_fd_rsp = mq_open(queue_name_rsp, O_WRONLY  | O_NONBLOCK);
     validate_mq(mq_fd_rsp, queue_name_rsp);
 
     fprintf(stderr, "worker_s1 (PID %d): started, listening on '%s', responding on '%s'\n", getpid(), queue_name_s1, queue_name_rsp);
@@ -84,7 +84,10 @@ int main (int argc, char * argv[])
         exit(0);
       }
 
-      send_to_router(&msg);
+      fprintf(stderr, "worker_s1 (PID %d): received job=%d, data=%d\n", getpid(), msg.job, msg.data);
+      rsleep(10000);    
+      msg.data = service(msg.data);
+      send_to_router(msg);
     }
 
     return(0);
@@ -129,21 +132,15 @@ void validate_mq(mqd_t mq, char queue_name[])
   }
 }
 
-void send_to_router(MQ_MESSAGE *msg)
+void send_to_router(MQ_MESSAGE msg)
 {
-  fprintf(stderr, "worker_s1 (PID %d): received job=%d, data=%d\n", getpid(), msg->job, msg->data);
+  fprintf(stderr, "worker_s1 (PID %d): sending job=%d, result=%d\n", getpid(), msg.job, msg.data);
 
-  rsleep(10000);    
-
-  int result = service(msg->data);
-  msg->data = result;
-  fprintf(stderr, "worker_s1 (PID %d): sending job=%d, result=%d\n", getpid(), msg->job, msg->data);
-
-  if (mq_send(mq_fd_rsp, (char *)msg, sizeof(MQ_MESSAGE), 0) == -1)
+  if (mq_send(mq_fd_rsp, (char *)&msg, sizeof(MQ_MESSAGE), 0) == -1)
   {
     if (errno == EAGAIN) 
     {
-      fprintf(stderr, "worker_s1 (PID %d): Response queue is full, job %d is lost \n", getpid(), msg->job);
+      fprintf(stderr, "worker_s1 (PID %d): Response queue is full, job %d is lost \n", getpid(), msg.job);
     } 
     else 
     {
@@ -155,40 +152,30 @@ void send_to_router(MQ_MESSAGE *msg)
 
 bool receive_with_timeout(mqd_t queue, MQ_MESSAGE *msg) 
 {
-  struct timeval timeout;
-  fd_set fds;
-  int ret;
+  struct timespec timeout;
+  struct timeval now;
+  int res;
 
-  timeout.tv_sec = TIMEOUT_SEC;
-  timeout.tv_usec = 0;
+  // Get the current time
+  gettimeofday(&now, NULL);
 
-  // Prepare for select call
-  FD_ZERO(&fds);
-  FD_SET(queue, &fds);
+  // Set timeout to current time + timeout_sec
+  timeout.tv_sec = now.tv_sec + TIMEOUT_SEC;
+  timeout.tv_nsec = now.tv_usec * 1000; // Convert microseconds to nanoseconds
 
-  // Use select to wait for the message queue to be ready for reading
-  ret = select(FD_SETSIZE, &fds, NULL, NULL, &timeout);
+  res = mq_timedreceive(queue, (char*)msg, sizeof(MQ_MESSAGE), NULL, &timeout);
 
-  if (ret == -1) 
-  {
-    perror("select failed");
-    exit(1);
-  }
-  if (ret == 0) 
-  {
-    fprintf(stderr, "worker_s1 (PID %d): Timeout reached. No message received.\n", getpid());
-    return false;
-  }
-  if (FD_ISSET(queue, &fds)) {
-    // Try to receive the message from the queue
-    ssize_t bytes_read = mq_receive(queue, (char *)msg, sizeof(MQ_MESSAGE), NULL);
-    if (bytes_read == -1) {
-        perror("mq_receive failed");
-        exit(1);
+  if (res == -1) {
+    if (errno == ETIMEDOUT) {
+      // Timeout occurred
+      return false;
+    } else {
+      // Some other error occurred
+      perror("mq_timedreceive");
+      return false;
     }
-
-    return true;  // Successfully received message
   }
 
-  return false;  // This should never be reached in this logic
+  // Message received successfully
+  return true;
 }
