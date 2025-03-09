@@ -40,12 +40,9 @@ void close_mqs(mqd_t client2dealer_queue, mqd_t dealer2worker1_queue, mqd_t deal
 void validate_mq(mqd_t mq, char queue_name[]);
 bool is_child_running(pid_t child_pid);
 bool receive_queue(mqd_t queue, MQ_MESSAGE *msg);
-bool transfer_to_worker(mqd_t dealer2worker1_queue, mqd_t dealer2worker2_queue, MQ_MESSAGE m);
-void add_job(int **jobList, int *jobListSize, int jobId);
-void remove_job(int **jobList, int *jobListSize, int jobId);
-void process_wroker_response(mqd_t queue, int **jobList, int *jobListSize);
-void terminate_all_workers(pid_t *pids, int num_workers);
-void wait_for_all_workers(pid_t *pids, int num_workers);
+void transfer_to_worker(mqd_t dealer2worker1_queue, mqd_t dealer2worker2_queue, MQ_MESSAGE m);
+bool process_worker_response(mqd_t queue);
+void process_responses_until_workers_exit(mqd_t worker2dealer_queue, pid_t *pid_workers, int num_workers);
 
 int main(int argc, char * argv[])
 {
@@ -66,8 +63,6 @@ int main(int argc, char * argv[])
 
   pid_t pid_client;
   pid_t pid_workers[1 + N_SERV1 + N_SERV2];
-  int *jobList = NULL;
-  int jobListSize = 0;
   
   // TODO:
     //  * create the message queues (see message_queue_test() in
@@ -91,27 +86,34 @@ int main(int argc, char * argv[])
 
   while (is_child_running(pid_client))
   {
-    bool has_received = receive_queue(client2dealer_queue, &m);
-    if (has_received) 
+    bool has_client_msg = receive_queue(client2dealer_queue, &m);
+    if (has_client_msg) 
     {
-      bool has_sent = transfer_to_worker(dealer2worker1_queue, dealer2worker2_queue, m);
-      if (has_sent)
-        add_job(&jobList, &jobListSize, m.job);
+      transfer_to_worker(dealer2worker1_queue, dealer2worker2_queue, m);
     }
 
-    process_wroker_response(worker2dealer_queue, &jobList, &jobListSize);
+    process_worker_response(worker2dealer_queue);
   }
 
-  while (jobListSize != 0)
+  // Drain any remaining requests from client2dealer_queue
+  bool has_client_msg = receive_queue(client2dealer_queue, &m);
+  while (has_client_msg)
   {
-    process_wroker_response(worker2dealer_queue, &jobList, &jobListSize);
+    transfer_to_worker(dealer2worker1_queue, dealer2worker2_queue, m);
+    process_worker_response(worker2dealer_queue);
+    has_client_msg = receive_queue(client2dealer_queue, &m);
   }
 
-  fprintf(stderr, "Parent is sending termination signal to workers...\n");
-  terminate_all_workers(pid_workers, N_SERV1 + N_SERV2);
-  wait_for_all_workers(pid_workers, N_SERV1 + N_SERV2);
+  process_responses_until_workers_exit(worker2dealer_queue, pid_workers, N_SERV1 + N_SERV2);
   fprintf(stderr, "All workers terminated and cleaned up.\n");
 
+  // Drain any remaining responses from worker2dealer_queue
+  bool has_worker_msg = process_worker_response(worker2dealer_queue);
+  while (has_worker_msg)
+  {
+    has_worker_msg = process_worker_response(worker2dealer_queue);
+  }
+  
   close_mqs(client2dealer_queue, dealer2worker1_queue, dealer2worker2_queue, worker2dealer_queue, 
               client2dealer_name, dealer2worker1_name, dealer2worker2_name, worker2dealer_name);
   return (0);
@@ -131,11 +133,11 @@ void open_mqs(mqd_t *client2dealer_queue, mqd_t *dealer2worker1_queue, mqd_t *de
 
   *client2dealer_queue = mq_open(client2dealer_name, O_RDONLY | O_CREAT | O_EXCL, 0600, &attr);
   validate_mq(*client2dealer_queue, client2dealer_name);
-  *dealer2worker1_queue = mq_open(dealer2worker1_name, O_WRONLY | O_CREAT | O_EXCL | O_NONBLOCK, 0600, &attr);
+  *dealer2worker1_queue = mq_open(dealer2worker1_name, O_WRONLY | O_CREAT | O_EXCL, 0600, &attr);
   validate_mq(*dealer2worker1_queue, dealer2worker1_name);
-  *dealer2worker2_queue = mq_open(dealer2worker2_name, O_WRONLY | O_CREAT | O_EXCL | O_NONBLOCK, 0600, &attr);
+  *dealer2worker2_queue = mq_open(dealer2worker2_name, O_WRONLY | O_CREAT | O_EXCL, 0600, &attr);
   validate_mq(*dealer2worker2_queue, dealer2worker2_name);
-  *worker2dealer_queue = mq_open(worker2dealer_name, O_RDONLY | O_CREAT | O_EXCL, 0600, &attr);
+  *worker2dealer_queue = mq_open(worker2dealer_name, O_RDONLY | O_CREAT | O_EXCL | O_NONBLOCK, 0600, &attr);
   validate_mq(*worker2dealer_queue, worker2dealer_name);
 }
 
@@ -264,34 +266,43 @@ bool receive_queue(mqd_t queue, MQ_MESSAGE *msg)
       exit(1);
   }
 
-  // If the queue is empty, skip receiving
+  // Check if the queue is in non-blocking mode
+  bool is_nonblocking = (attr.mq_flags & O_NONBLOCK) != 0;
+
+  // If the queue is empty, skip
   if (attr.mq_curmsgs == 0) 
   {
       return false;
   }
-  int result = mq_receive(queue, (char*)msg, sizeof(MQ_MESSAGE), NULL);
+
+  // There is a message
+  int result = mq_receive(queue, (char*)msg, sizeof(*msg), NULL);
 
   if (result == -1) 
   {
-    if (errno != EAGAIN)
+    if (errno == EAGAIN && is_nonblocking) 
     {
-      perror("Receiving failed");
-      exit(1);
+      return false;  // Queue is empty, no messages available
     }
-
-    return false;
+    perror("Receiving failed");
+    exit(1);
   }
+
   return true;
 }
 
-bool transfer_to_worker(mqd_t dealer2worker1_queue, mqd_t dealer2worker2_queue, MQ_MESSAGE m)
+void transfer_to_worker(mqd_t dealer2worker1_queue, mqd_t dealer2worker2_queue, MQ_MESSAGE m)
 {
   int result = -1;
 
   if (m.service == 1)
+  {
     result = mq_send(dealer2worker1_queue, (char*)&m, sizeof(MQ_MESSAGE), 0);
+  }
   else if (m.service == 2)
+  {
     result = mq_send(dealer2worker2_queue, (char*)&m, sizeof(MQ_MESSAGE), 0);
+  }
   else
   {
     fprintf(stderr, "Invalid message service: %d\n", m.service);
@@ -300,94 +311,46 @@ bool transfer_to_worker(mqd_t dealer2worker1_queue, mqd_t dealer2worker2_queue, 
 
   if (result == -1) 
   {
-    if (errno == EAGAIN) 
-    {
-      fprintf(stderr, "Queue is full. Message with service %d could not be sent.\n", m.service);
-      return false;
-    }
-    else 
-    {
-      perror("mq_send failed");
-      exit(1);
-    }
+    // Worker queues are blocking, no need to check EAGAIN
+    perror("mq_send failed");
+    exit(1);
   }
-  
-  return true;
+  fprintf(stderr, "router (PID %d): sent job=%d to service %d\n", getpid(), m.job, m.service);
 }
 
-void add_job(int **jobList, int *jobListSize, int jobId) 
-{
-  // Resize the list if necessary
-  (*jobListSize)++;
-  *jobList = realloc(*jobList, (*jobListSize) * sizeof(int));
-  
-  if (*jobList == NULL) 
-  {
-    perror("Failed to reallocate memory");
-    exit(1); // Exit if realloc fails
-  }
-
-  // Add the new jobId to the list
-  (*jobList)[(*jobListSize) - 1] = jobId;
-}
-
-void remove_job(int **jobList, int *jobListSize, int jobId) 
-{
-  // Find the index of the jobId to remove
-  int index = -1;
-  for (int i = 0; i < *jobListSize; i++) 
-  {
-    if ((*jobList)[i] == jobId) 
-    {
-      index = i;
-      break;
-    }
-  }
-
-  // If jobId is found, remove it
-  if (index != -1) {
-    // Shift elements to the left to fill the gap
-    for (int i = index; i < *jobListSize - 1; i++) {
-      (*jobList)[i] = (*jobList)[i + 1];
-    }
-
-    // Resize the list to reflect the removal
-    (*jobListSize)--;
-    *jobList = realloc(*jobList, (*jobListSize) * sizeof(int));
-
-    if (*jobList == NULL && *jobListSize > 0) {
-      perror("Failed to reallocate memory after removal");
-      exit(1); // Exit if realloc fails
-    }
-  }
-}
-
-void process_wroker_response(mqd_t queue, int **jobList, int *jobListSize) 
+bool process_worker_response(mqd_t queue) 
 {
   MQ_MESSAGE m;
   bool has_received = receive_queue(queue, &m);
   
   if (has_received) 
   {
-    fprintf(stderr, "Service: %d, Data: %d\n", m.service, m.data);
-    remove_job(jobList, jobListSize, m.job);
+    fprintf(stdout, "data: %d, job %d, service: %d\n", m.data, m.job, m.service);
+    return true;
   }
+
+  return false;
 }
 
-void terminate_all_workers(pid_t *pids, int num_workers) {
-  for (int i = 0; i < num_workers; i++) {
-      if (pids[i] > 0) {
-          // Send SIGTERM to the worker process
-          kill(pids[i], SIGTERM);
-      }
-  }
-}
+void process_responses_until_workers_exit(mqd_t worker2dealer_queue, pid_t *pid_workers, int num_workers) {
+  int active_workers = num_workers; // Track active workers
 
-void wait_for_all_workers(pid_t *pids, int num_workers) {
-  int status;
-  for (int i = 0; i < num_workers; i++) {
-      if (pids[i] > 0) {
-          waitpid(pids[i], &status, 0); // Wait for each worker to exit
+  // Process responses while workers are still alive
+  while (active_workers > 0) {
+    process_worker_response(worker2dealer_queue);
+
+    // Check if any workers have terminated
+    for (int i = 0; i < num_workers; i++) {
+      if (pid_workers[i] > 0) { // If worker is still alive
+        fprintf(stdout, "Worker pid %d is still alive\n", pid_workers[i]);
+        int status;
+        pid_t result = waitpid(pid_workers[i], &status, WNOHANG);
+        if (result > 0) { // Worker has exited
+          fprintf(stderr, "Worker %d exited with status %d.\n", pid_workers[i], status);
+          pid_workers[i] = -1; // Mark as handled
+          active_workers--;
+        }
       }
+    }
   }
 }

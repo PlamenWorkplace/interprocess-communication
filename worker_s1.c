@@ -21,15 +21,19 @@
 #include <unistd.h>     // for getpid()
 #include <mqueue.h>     // for mq-stuff
 #include <time.h>       // for time()
-#include <signal.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/time.h>
 
 #include "messages.h"
 #include "service1.h"
 
+#define TIMEOUT_SEC 3
+
 static void rsleep (int t);
-void close_mqs();
 void validate_mq(mqd_t mq, char queue_name[]);
-void handle_termination(int signum);
+void send_to_router(MQ_MESSAGE *msg);
+bool receive_with_timeout(mqd_t queue, MQ_MESSAGE *msg);
 
 mqd_t mq_fd_s1, mq_fd_rsp;
 char *queue_name_s1, *queue_name_rsp;
@@ -66,44 +70,21 @@ int main (int argc, char * argv[])
 
     fprintf(stderr, "worker_s1 (PID %d): started, listening on '%s', responding on '%s'\n", getpid(), queue_name_s1, queue_name_rsp);
 
-    // Register the signal handler
-    signal(SIGTERM, handle_termination);
-
     // Handle requests
-    while (true){
-        MQ_MESSAGE req; //change this when we have a message queue
-        ssize_t bytes_read = mq_receive(mq_fd_s1, (char*)&req, sizeof(req), NULL);
+    while (true)
+    {
+      MQ_MESSAGE msg;
+      bool has_received = receive_with_timeout(mq_fd_s1, &msg);
 
-        //use this later to handle interrupted messages
-        if (bytes_read == -1){
-            
-            if (errno == EINTR){
-                continue;
-            }
-            perror("mq_receive S1 fail");
-            break;
-        }
+      if (!has_received)
+      {
+        mq_close(mq_fd_s1);
+        mq_close(mq_fd_rsp);
+        fprintf(stderr, "(PID %d): Resources cleaned, terminating...\n", getpid());
+        exit(0);
+      }
 
-        fprintf(stderr, "worker_sq (PID %d): received job=%d, data=%d\n",
-        getpid(), req.job, req.data);
-
-        rsleep(10000);    
-
-        //result
-        int result = service(req.data);
-
-        //reply
-        MQ_MESSAGE rsp;
-        rsp.job = req.job;
-        rsp.data = result;
-
-        fprintf(stderr, "worker_s1 (PID %d): sending job=%d, result=%d\n",
-        getpid(), rsp.job, rsp.data);
-
-        if (mq_send(mq_fd_rsp, (char *)&rsp, sizeof(rsp), 0) == -1){
-            perror("mq_send RSP fail");
-            break;
-        }
+      send_to_router(&msg);
     }
 
     return(0);
@@ -128,18 +109,6 @@ static void rsleep (int t)
     usleep (random() % t);
 }
 
-void close_mqs()
-{
-  if (mq_fd_s1 != (mqd_t) -1) {
-    mq_close(mq_fd_s1);
-    mq_unlink(queue_name_s1);
-  }
-  if (mq_fd_rsp != (mqd_t) -1) {
-    mq_close(mq_fd_rsp);
-    mq_unlink(queue_name_rsp);
-  }
-}
-
 void validate_mq(mqd_t mq, char queue_name[])
 {
   if (mq == (mqd_t)-1) 
@@ -160,8 +129,66 @@ void validate_mq(mqd_t mq, char queue_name[])
   }
 }
 
-void handle_termination(int signum) {
-  close_mqs();
-  fprintf(stderr, "(PID %d): Resources cleaned, terminating...", getpid());
-  exit(0);
+void send_to_router(MQ_MESSAGE *msg)
+{
+  fprintf(stderr, "worker_s1 (PID %d): received job=%d, data=%d\n", getpid(), msg->job, msg->data);
+
+  rsleep(10000);    
+
+  int result = service(msg->data);
+  msg->data = result;
+  fprintf(stderr, "worker_s1 (PID %d): sending job=%d, result=%d\n", getpid(), msg->job, msg->data);
+
+  if (mq_send(mq_fd_rsp, (char *)msg, sizeof(MQ_MESSAGE), 0) == -1)
+  {
+    if (errno == EAGAIN) 
+    {
+      fprintf(stderr, "worker_s1 (PID %d): Response queue is full, job %d is lost \n", getpid(), msg->job);
+    } 
+    else 
+    {
+      perror("mq_send RSP fail");
+      exit(1);
+    }
+  }
+}
+
+bool receive_with_timeout(mqd_t queue, MQ_MESSAGE *msg) 
+{
+  struct timeval timeout;
+  fd_set fds;
+  int ret;
+
+  timeout.tv_sec = TIMEOUT_SEC;
+  timeout.tv_usec = 0;
+
+  // Prepare for select call
+  FD_ZERO(&fds);
+  FD_SET(queue, &fds);
+
+  // Use select to wait for the message queue to be ready for reading
+  ret = select(FD_SETSIZE, &fds, NULL, NULL, &timeout);
+
+  if (ret == -1) 
+  {
+    perror("select failed");
+    exit(1);
+  }
+  if (ret == 0) 
+  {
+    fprintf(stderr, "worker_s1 (PID %d): Timeout reached. No message received.\n", getpid());
+    return false;
+  }
+  if (FD_ISSET(queue, &fds)) {
+    // Try to receive the message from the queue
+    ssize_t bytes_read = mq_receive(queue, (char *)msg, sizeof(MQ_MESSAGE), NULL);
+    if (bytes_read == -1) {
+        perror("mq_receive failed");
+        exit(1);
+    }
+
+    return true;  // Successfully received message
+  }
+
+  return false;  // This should never be reached in this logic
 }
