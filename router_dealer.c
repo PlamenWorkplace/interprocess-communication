@@ -342,7 +342,6 @@ void process_responses_until_workers_exit(mqd_t worker2dealer_queue, pid_t *pid_
     // Check if any workers have terminated
     for (int i = 0; i < num_workers; i++) {
       if (pid_workers[i] > 0) { // If worker is still alive
-        fprintf(stdout, "Worker pid %d is still alive\n", pid_workers[i]);
         int status;
         pid_t result = waitpid(pid_workers[i], &status, WNOHANG);
         if (result > 0) { // Worker has exited
