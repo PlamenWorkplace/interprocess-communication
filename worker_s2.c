@@ -28,7 +28,7 @@
 #include "messages.h"
 #include "service2.h"
 
-#define TIMEOUT_SEC 3
+#define TIMEOUT_SEC 1
 
 static void rsleep (int t);
 void validate_mq(mqd_t mq, char queue_name[]);
