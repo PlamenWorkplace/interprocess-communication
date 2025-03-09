@@ -63,6 +63,8 @@ int main (int argc, char * argv[])
         msg.job = jobID;
         msg.data = data;
         msg.service = service;
+
+        fprintf(stderr, "client (PID %d): sending job=%d\n", getpid(), msg.job);
         
         // send the request to the Req message queue
         if (mq_send(mq_req, (char *)&msg, sizeof(msg), 0) == -1) {
