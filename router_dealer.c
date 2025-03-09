@@ -325,7 +325,7 @@ bool process_worker_response(mqd_t queue)
   
   if (has_received) 
   {
-    fprintf(stdout, "data: %d, job %d, service: %d\n", m.data, m.job, m.service);
+    fprintf(stdout, "%d -> %d\n", m.job, m.data);
     return true;
   }
 
