@@ -39,7 +39,7 @@ void close_mqs(mqd_t client2dealer_queue, mqd_t dealer2worker1_queue, mqd_t deal
               char client2dealer_name[], char dealer2worker1_name[], char dealer2worker2_name[], char worker2dealer_name[]);
 void validate_mq(mqd_t mq, char queue_name[]);
 bool is_child_running(pid_t child_pid);
-bool receive_queue(mqd_t queue, MQ_MESSAGE *msg);
+bool receive_async(mqd_t queue, MQ_MESSAGE *msg);
 void transfer_to_worker(mqd_t dealer2worker1_queue, mqd_t dealer2worker2_queue, MQ_MESSAGE m);
 bool process_worker_response(mqd_t queue);
 void process_responses_until_workers_exit(mqd_t worker2dealer_queue, pid_t *pid_workers, int num_workers);
@@ -86,7 +86,7 @@ int main(int argc, char * argv[])
 
   while (is_child_running(pid_client))
   {
-    bool has_client_msg = receive_queue(client2dealer_queue, &m);
+    bool has_client_msg = receive_async(client2dealer_queue, &m);
     if (has_client_msg) 
     {
       transfer_to_worker(dealer2worker1_queue, dealer2worker2_queue, m);
@@ -96,12 +96,12 @@ int main(int argc, char * argv[])
   }
 
   // Drain any remaining requests from client2dealer_queue
-  bool has_client_msg = receive_queue(client2dealer_queue, &m);
+  bool has_client_msg = receive_async(client2dealer_queue, &m);
   while (has_client_msg)
   {
     transfer_to_worker(dealer2worker1_queue, dealer2worker2_queue, m);
     process_worker_response(worker2dealer_queue);
-    has_client_msg = receive_queue(client2dealer_queue, &m);
+    has_client_msg = receive_async(client2dealer_queue, &m);
   }
 
   process_responses_until_workers_exit(worker2dealer_queue, pid_workers, N_SERV1 + N_SERV2);
@@ -257,32 +257,16 @@ bool is_child_running(pid_t child_pid)
   }
 }
 
-bool receive_queue(mqd_t queue, MQ_MESSAGE *msg)
+bool receive_async(mqd_t queue, MQ_MESSAGE *msg)
 {
-  struct mq_attr attr;
-  if (mq_getattr(queue, &attr) == -1) 
-  {
-      perror("mq_getattr failed");
-      exit(1);
-  }
-
-  // Check if the queue is in non-blocking mode
-  bool is_nonblocking = (attr.mq_flags & O_NONBLOCK) != 0;
-
-  // If the queue is empty, skip
-  if (attr.mq_curmsgs == 0) 
-  {
-      return false;
-  }
-
-  // There is a message
   int result = mq_receive(queue, (char*)msg, sizeof(*msg), NULL);
 
   if (result == -1) 
   {
-    if (errno == EAGAIN && is_nonblocking) 
+    if (errno == EAGAIN) 
     {
-      return false;  // Queue is empty, no messages available
+      // Queue is empty, no messages available
+      return false;  
     }
     perror("Receiving failed");
     exit(1);
@@ -321,7 +305,7 @@ void transfer_to_worker(mqd_t dealer2worker1_queue, mqd_t dealer2worker2_queue, 
 bool process_worker_response(mqd_t queue) 
 {
   MQ_MESSAGE m;
-  bool has_received = receive_queue(queue, &m);
+  bool has_received = receive_async(queue, &m);
   
   if (has_received) 
   {
