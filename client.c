@@ -2,8 +2,9 @@
  * Operating Systems  (2INCO)  Practical Assignment
  * Interprocess Communication
  *
- * STUDENT_NAME_1 (STUDENT_NR_1)
- * STUDENT_NAME_2 (STUDENT_NR_2)
+ * Simeon_Vazharov (1988077)
+ * Plamen_Nikolov (1960059)
+ * Valeri_Kitipov (1993313)
  *
  * Grading:
  * Your work will be evaluated based on the following criteria:
